@@ -19,6 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:3334";
+const DEFAULT_0310_UDP_BIND: &str = "0.0.0.0:3335";
 const DEFAULT_WIDTH: usize = 1280;
 const DEFAULT_HEIGHT: usize = 720;
 const DEFAULT_MQTT_HOST: &str = "192.168.12.1";
@@ -50,6 +51,8 @@ struct AppConfig {
     max_buffered_frames: usize,
     max_frame_bytes: usize,
     max_slices_per_frame: usize,
+    udp_0310_enabled: bool,
+    udp_0310_bind: SocketAddr,
     headless_seconds: Option<u64>,
     window_title: String,
 }
@@ -78,6 +81,10 @@ impl Default for AppConfig {
             max_buffered_frames: DEFAULT_MAX_BUFFERED_FRAMES,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             max_slices_per_frame: DEFAULT_MAX_SLICES_PER_FRAME,
+            udp_0310_enabled: true,
+            udp_0310_bind: DEFAULT_0310_UDP_BIND
+                .parse()
+                .expect("default 0310 udp bind addr must be valid"),
             headless_seconds: None,
             window_title: "RoboMaster Native Viewer".to_string(),
         }
@@ -156,6 +163,15 @@ impl AppConfig {
                 "--no-mqtt" => {
                     config.mqtt_enabled = false;
                 }
+                "--0310-udp-bind" => {
+                    let value = args.next().context("--0310-udp-bind 缺少参数")?;
+                    config.udp_0310_bind = value
+                        .parse()
+                        .with_context(|| format!("非法 0310 UDP 地址: {value}"))?;
+                }
+                "--no-0310-udp" => {
+                    config.udp_0310_enabled = false;
+                }
                 "--width" => {
                     let value = args.next().context("--width 缺少参数")?;
                     config.output_width = value
@@ -201,6 +217,8 @@ fn print_help() {
         "  --input-format <fmt>         ffmpeg 输入格式，默认 {DEFAULT_INPUT_FORMAT}，可设 hevc 兼容旧 UDP sender"
     );
     println!("  --no-mqtt                    禁用 MQTT metadata 接收");
+    println!("  --0310-udp-bind <addr:port>  PV31/0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}");
+    println!("  --no-0310-udp                禁用 PV31 UDP 直连接收");
     println!("  --width <n>                  输出宽度，默认 {DEFAULT_WIDTH}");
     println!("  --height <n>                 输出高度，默认 {DEFAULT_HEIGHT}");
     println!("  --headless-seconds <n>       无窗口烟测模式");
@@ -216,8 +234,20 @@ struct DecodedFrame {
 #[derive(Default)]
 struct StatusSnapshot {
     udp: UdpStats,
+    udp_0310: Udp0310Stats,
     decoder: DecoderStats,
     metadata: MetadataSnapshot,
+}
+
+#[derive(Default)]
+struct Udp0310Stats {
+    bound: bool,
+    packets_received: u64,
+    bytes_received: u64,
+    assembled_frames: u64,
+    last_packet_at: Option<Instant>,
+    last_source: Option<SocketAddr>,
+    last_seq: Option<u32>,
 }
 
 #[derive(Default)]
@@ -261,6 +291,11 @@ struct StatusView {
     decoded_frames: u64,
     ffmpeg_running: bool,
     last_error: Option<String>,
+    udp_0310_ok: bool,
+    udp_0310_packets: u64,
+    udp_0310_assembled: u64,
+    udp_0310_last_seq: String,
+    udp_0310_age_ms: Option<u128>,
     mqtt_enabled: bool,
     mqtt_connected: bool,
     mqtt_messages_received: u64,
@@ -282,6 +317,10 @@ fn snapshot_view(shared: &Arc<Mutex<StatusSnapshot>>, healthy_gap: Duration) -> 
     let mqtt_age = guard
         .metadata
         .last_message_at
+        .map(|instant| now.saturating_duration_since(instant).as_millis());
+    let udp_0310_age = guard
+        .udp_0310
+        .last_packet_at
         .map(|instant| now.saturating_duration_since(instant).as_millis());
 
     StatusView {
@@ -315,6 +354,18 @@ fn snapshot_view(shared: &Arc<Mutex<StatusSnapshot>>, healthy_gap: Duration) -> 
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string()),
         last_packet_age_ms: udp_age,
+        udp_0310_ok: guard.udp_0310.bound
+            && udp_0310_age
+                .map(|age| age <= healthy_gap.as_millis())
+                .unwrap_or(false),
+        udp_0310_packets: guard.udp_0310.packets_received,
+        udp_0310_assembled: guard.udp_0310.assembled_frames,
+        udp_0310_last_seq: guard
+            .udp_0310
+            .last_seq
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        udp_0310_age_ms: udp_0310_age,
         last_decode_age_ms: decode_age,
         last_mqtt_age_ms: mqtt_age,
         decoded_frames: guard.decoder.decoded_frames,
@@ -462,6 +513,94 @@ fn mqtt_receiver_loop(
         }
 
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn spawn_udp_0310_receiver(
+    config: AppConfig,
+    shared: Arc<Mutex<StatusSnapshot>>,
+    encoded_tx: Sender<Vec<u8>>,
+) -> Result<()> {
+    if !config.udp_0310_enabled {
+        return Ok(());
+    }
+
+    thread::Builder::new()
+        .name("rm-native-udp0310".to_string())
+        .spawn(move || udp_0310_receiver_loop(config, shared, encoded_tx))
+        .context("无法启动 PV31 UDP 接收线程")?;
+    Ok(())
+}
+
+fn udp_0310_receiver_loop(
+    config: AppConfig,
+    shared: Arc<Mutex<StatusSnapshot>>,
+    encoded_tx: Sender<Vec<u8>>,
+) {
+    let socket = match UdpSocket::bind(config.udp_0310_bind) {
+        Ok(socket) => socket,
+        Err(error) => {
+            set_decoder_error(&shared, format!("0310 UDP bind {} 失败: {error}", config.udp_0310_bind));
+            return;
+        }
+    };
+
+    if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(500))) {
+        set_decoder_error(&shared, format!("0310 UDP 设置超时失败: {error}"));
+        return;
+    }
+
+    if let Ok(mut guard) = shared.lock() {
+        guard.udp_0310.bound = true;
+    }
+
+    let mut packet = vec![0_u8; 300];
+
+    loop {
+        match socket.recv_from(&mut packet) {
+            Ok((size, source)) => {
+                if size < 24 {
+                    continue;
+                }
+
+                let chunk = match parse_video_0310_chunk(&packet[..size]) {
+                    Some(chunk) => chunk,
+                    None => continue,
+                };
+
+                let now = Instant::now();
+                let payload_len = chunk.payload.len();
+
+                if payload_len > 0 {
+                    if let Err(error) = encoded_tx.send(chunk.payload) {
+                        set_decoder_error(
+                            &shared,
+                            format!("0310 UDP 解码通道已断开: {error}"),
+                        );
+                        continue;
+                    }
+                }
+
+                if let Ok(mut guard) = shared.lock() {
+                    guard.udp_0310.packets_received += 1;
+                    guard.udp_0310.bytes_received += payload_len as u64;
+                    guard.udp_0310.assembled_frames += 1;
+                    guard.udp_0310.last_packet_at = Some(now);
+                    guard.udp_0310.last_source = Some(source);
+                    guard.udp_0310.last_seq = Some(chunk.sequence);
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // timeout, continue
+            }
+            Err(error) => {
+                set_decoder_error(&shared, format!("0310 UDP 接收错误: {error}"));
+                break;
+            }
+        }
     }
 }
 
@@ -1000,7 +1139,7 @@ impl eframe::App for ViewerApp {
             });
 
         let view = snapshot_view(&self.shared, self.config.healthy_gap);
-        let udp_color = if view.udp_ok {
+        let _udp_color = if view.udp_ok {
             Color32::from_rgb(54, 179, 126)
         } else {
             Color32::from_rgb(214, 69, 65)
@@ -1034,11 +1173,25 @@ impl eframe::App for ViewerApp {
                                 .size(18.0),
                         );
                         ui.separator();
+                        let _has_0310 = view.mqtt_enabled || view.udp_0310_ok;
+                        let udp_0310_ok = view.udp_0310_ok;
+                        let mqtt_video_ok = view.mqtt_ok && view.mqtt_enabled;
+                        let pv31_ok = mqtt_video_ok || udp_0310_ok;
+
                         ui.colored_label(
-                            udp_color,
+                            if pv31_ok { Color32::from_rgb(54, 179, 126) } else { Color32::from_rgb(214, 162, 65) },
                             format!(
                                 "0310 Video: {}",
-                                if view.udp_ok { "connected" } else { "waiting" }
+                                if pv31_ok { "connected" } else { "waiting" }
+                            ),
+                        );
+
+                        let raw_ok = view.udp_ok;
+                        ui.colored_label(
+                            if raw_ok { Color32::from_rgb(54, 179, 126) } else { Color32::from_rgb(130, 130, 130) },
+                            format!(
+                                "UDP Raw: {}",
+                                if raw_ok { "connected" } else { "waiting" }
                             ),
                         );
                         ui.colored_label(
@@ -1092,6 +1245,13 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("Buffered frames: {}", view.buffered_frames));
                         ui.label(format!("Decoded frames: {}", view.decoded_frames));
                         ui.label(format!("MQTT messages: {}", view.mqtt_messages_received));
+                        if !view.mqtt_enabled {
+                            ui.label(format!(
+                                "PV31 UDP: {} pkts seq={}",
+                                view.udp_0310_packets,
+                                view.udp_0310_last_seq,
+                            ));
+                        }
                         ui.label(format!("Display FPS: {:.1}", self.display_fps));
                         ui.label(format!(
                             "Last packet age: {}",
@@ -1210,6 +1370,7 @@ fn main() -> Result<()> {
     let (frame_tx, frame_rx) = bounded::<DecodedFrame>(2);
 
     spawn_udp_receiver(config.clone(), shared.clone(), hevc_tx.clone())?;
+    spawn_udp_0310_receiver(config.clone(), shared.clone(), hevc_tx.clone())?;
     spawn_metadata_receiver(config.clone(), shared.clone(), hevc_tx)?;
     spawn_decoder(
         config.clone(),
