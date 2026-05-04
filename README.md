@@ -18,7 +18,7 @@
 - 旧链路兼容：可显式启用 UDP 3334 + HEVC
 - 原生窗口显示：无浏览器依赖
 - headless 烟测：适合 CI、本地回放和远端部署自检
-- official 默认启动，lab profile 保留给调试
+- 默认 client id 为 `101`，也支持直接切到 `1`
 
 ## 目录结构
 
@@ -34,7 +34,7 @@ rm-native-viewer/
 说明：
 
 - `src/`：Rust 主程序与 `PV31` / telemetry 解析逻辑
-- `scripts/`：profile 启动、部署辅助脚本
+- `scripts/`：启动、部署辅助脚本
 - `deploy/`：桌面自启动和 systemd 相关模板
 
 ## 环境要求
@@ -164,35 +164,23 @@ cargo run --release -- 1
 --raw-udp --input-format hevc
 ```
 
-## Profile 启动
+## 快捷启动
 
-内置两个 profile：
-
-- `official`：`192.168.12.1`
-- `lab`：`10.42.0.1`
-
-直接运行：
+直接按 client id 启动：
 
 ```bash
-./scripts/run-profile.sh official
-./scripts/run-profile.sh lab
+./scripts/run-viewer.sh 101
+./scripts/run-viewer.sh 1
 ```
 
-也可以只传 client id，默认就是 official：
+兼容旧脚本时，也可以这样写：
 
 ```bash
 ./scripts/run-profile.sh 101
 ./scripts/run-profile.sh 1
 ```
 
-环境变量覆盖：
-
-- `RM_VIEWER_OFFICIAL_SOURCE`
-- `RM_VIEWER_OFFICIAL_MQTT_HOST`
-- `RM_VIEWER_LAB_SOURCE`
-- `RM_VIEWER_LAB_MQTT_HOST`
-
-其他运行环境变量：
+可用环境变量：
 
 - `RM_VIEWER_BIND`
 - `RM_VIEWER_ALLOW_SOURCE`
@@ -239,15 +227,23 @@ cargo build --release
 
 该脚本会：
 
+- 自动执行 `cargo build --release`
 - 复制 release 二进制到 `bin/`
-- 复制 profile 启动脚本
-- 安装桌面自启动项
+- 复制简化启动脚本
+- 安装两个桌面自启动项：`Client 1` 和 `Client 101`
+- 自动清理旧的 `official/lab` viewer 自启动项
 
-支持设置默认 profile：
+支持切换默认启用的 client id：
 
 ```bash
-./scripts/install-autostart.sh --default-profile official
-./scripts/install-autostart.sh --default-profile lab
+./scripts/install-autostart.sh --default-client 101
+./scripts/install-autostart.sh --default-client 1
+```
+
+如果你已经手动编译过，也可以跳过构建：
+
+```bash
+./scripts/install-autostart.sh --skip-build
 ```
 
 临时手动启动：
@@ -255,8 +251,8 @@ cargo build --release
 ```bash
 ./bin/rm-native-viewer
 ./bin/rm-native-viewer-run
-./bin/rm-native-viewer-profile official
-./bin/rm-native-viewer-profile lab
+./bin/rm-native-viewer-run 101
+./bin/rm-native-viewer-run 1
 ```
 
 ## 常见问题
