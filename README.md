@@ -1,6 +1,6 @@
 # rm-native-viewer
 
-`rm-native-viewer` 是一个原生 Rust 解码端，不依赖浏览器或网页前端，专门用于 RoboMaster 2026 部署模式下的低带宽 `0x0310` 自定义客户端视频链路。
+`rm-native-viewer` 是一个原生 Rust 解码端，不依赖浏览器或网页前端，专门用于 RoboMaster 2026 官方 `0x0310 -> MQTT CustomByteBlock` 自定义客户端视频链路。
 
 当前版本已经按正式链路工作：
 
@@ -9,16 +9,16 @@
 - 调用系统 `ffmpeg` 解码
 - 在原生窗口中显示画面并叠加状态信息
 - 对非视频 `0x0310` 数据兼容 telemetry v1 解析
-- 保留 UDP 3334 + HEVC 作为旧实验链路 fallback
+- 默认关闭 UDP 3334 + HEVC，旧实验链路需要显式打开
 
 ## 功能概览
 
 - 官方主链路：MQTT `CustomByteBlock` -> `0x0310` -> `PV31` -> H264
 - telemetry fallback：同一条 `0x0310` 链路上兼容解析状态结构体
-- 旧链路兼容：UDP 3334 + HEVC
+- 旧链路兼容：可显式启用 UDP 3334 + HEVC
 - 原生窗口显示：无浏览器依赖
 - headless 烟测：适合 CI、本地回放和远端部署自检
-- official / lab 双 profile 启动
+- official 默认启动，lab profile 保留给调试
 
 ## 目录结构
 
@@ -66,43 +66,56 @@ target/release/rm-native-viewer
 
 ## 运行
 
-默认直接运行：
+默认直接运行即可。当前默认值就是官方链路：`192.168.12.1:3333`、`CustomByteBlock`、H264、client id `101`、无 UDP 干扰。
 
 ```bash
 cargo run --release
 ```
 
-默认行为：
-
-- UDP 监听 `0.0.0.0:3334`
-- MQTT 连接 `192.168.12.1:3333`
-- topic 为 `CustomByteBlock`
-- 默认输入格式为 `h264`
-
-常用完整参数：
+如果要把 client id 改成 `1`，只需要传这一个值：
 
 ```bash
-cargo run --release -- \
-  --bind 0.0.0.0:3334 \
-  --allow-source 192.168.12.1 \
-  --mqtt-host 192.168.12.1 \
-  --mqtt-port 3333 \
-  --mqtt-topic CustomByteBlock \
-  --mqtt-client-id 1 \
-  --input-format h264
+cargo run --release -- 1
+```
+
+部署脚本同理：
+
+```bash
+./scripts/run-viewer.sh
+./scripts/run-viewer.sh 1
+```
+
+默认行为：
+
+- MQTT 连接 `192.168.12.1:3333`
+- topic 为 `CustomByteBlock`
+- client id 为 `101`
+- 输入格式为 `h264`
+- 显示窗口为 `800x800`
+- UDP/3334 原始图传和本地 PV31 UDP 默认关闭
+
+需要显式指定 client id 时：
+
+```bash
+cargo run --release -- 101
+cargo run --release -- 1
 ```
 
 ## 命令行参数
 
+- `<mqtt-client-id>`：可选快捷参数，例如 `101` 或 `1`
 - `--bind <addr:port>`：UDP 监听地址，默认 `0.0.0.0:3334`
 - `--allow-source <ip>`：限制 UDP 来源 IP
-- `--width <n>`：显示宽度，默认 `1280`
-- `--height <n>`：显示高度，默认 `720`
+- `--raw-udp` / `--enable-raw-udp`：启用 UDP/3334 HEVC 原始图传输入，默认关闭
+- `--no-udp` / `--no-raw-udp`：关闭 UDP/3334 HEVC 原始图传输入
+- `--0310-udp` / `--enable-0310-udp`：启用本地 PV31 UDP 直连接收，默认关闭
+- `--width <n>`：显示宽度，默认 `800`
+- `--height <n>`：显示高度，默认 `800`
 - `--ffmpeg <path>`：ffmpeg 路径，默认 `ffmpeg`
 - `--mqtt-host <host>`：MQTT 地址，默认 `192.168.12.1`
 - `--mqtt-port <port>`：MQTT 端口，默认 `3333`
 - `--mqtt-topic <topic>`：topic，默认 `CustomByteBlock`
-- `--mqtt-client-id <id>`：客户端 ID
+- `--mqtt-client-id <id>` / `--client-id <id>`：客户端 ID，默认 `101`
 - `--input-format <fmt>`：`h264` 或 `hevc`
 - `--no-mqtt`：关闭 MQTT，仅保留 UDP 视频输入
 - `--headless-seconds <n>`：无窗口烟测
@@ -148,7 +161,7 @@ cargo run --release -- \
 如果你在接旧 sender，要显式加：
 
 ```bash
---input-format hevc
+--raw-udp --input-format hevc
 ```
 
 ## Profile 启动
@@ -163,6 +176,13 @@ cargo run --release -- \
 ```bash
 ./scripts/run-profile.sh official
 ./scripts/run-profile.sh lab
+```
+
+也可以只传 client id，默认就是 official：
+
+```bash
+./scripts/run-profile.sh 101
+./scripts/run-profile.sh 1
 ```
 
 环境变量覆盖：
@@ -182,6 +202,9 @@ cargo run --release -- \
 - `RM_VIEWER_MQTT_TOPIC`
 - `RM_VIEWER_CLIENT_ID`
 - `RM_VIEWER_INPUT_FORMAT`
+- `RM_VIEWER_ENABLE_RAW_UDP`
+- `RM_VIEWER_DISABLE_RAW_UDP`
+- `RM_VIEWER_ENABLE_0310_UDP`
 - `RM_VIEWER_DISABLE_MQTT`
 
 ## 烟测
@@ -189,7 +212,7 @@ cargo run --release -- \
 本地或远端无窗口自检：
 
 ```bash
-cargo run --release -- --headless-seconds 8 --allow-source 127.0.0.1
+cargo run --release -- --headless-seconds 8
 ```
 
 如果 8 秒内成功解码至少一帧，程序返回成功。
@@ -231,6 +254,7 @@ cargo build --release
 
 ```bash
 ./bin/rm-native-viewer
+./bin/rm-native-viewer-run
 ./bin/rm-native-viewer-profile official
 ./bin/rm-native-viewer-profile lab
 ```
@@ -252,4 +276,4 @@ cargo build --release
 
 ### 3. 只想测 MQTT 主链路，不要 UDP 干扰
 
-可以继续保留默认 UDP 监听，也可以通过部署时只接入 MQTT 来使用；UDP 不会影响 `PV31` 主链路解析。
+默认已经关闭 UDP/3334 和本地 PV31 UDP，只走官方 MQTT 主链路。需要旧链路调试时再显式加 `--raw-udp` 或 `--0310-udp`。

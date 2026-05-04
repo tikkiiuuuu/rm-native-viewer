@@ -9,8 +9,10 @@ SOURCE_BIN="$PROJECT_DIR/target/release/rm-native-viewer"
 TARGET_BIN="$BIN_DIR/rm-native-viewer"
 SOURCE_LAUNCHER="$PROJECT_DIR/scripts/run-profile.sh"
 TARGET_LAUNCHER="$BIN_DIR/rm-native-viewer-profile"
+SOURCE_SIMPLE_LAUNCHER="$PROJECT_DIR/scripts/run-viewer.sh"
+TARGET_SIMPLE_LAUNCHER="$BIN_DIR/rm-native-viewer-run"
 TEMPLATE="$PROJECT_DIR/deploy/autostart/rm-native-viewer.desktop.in"
-DEFAULT_PROFILE="lab"
+DEFAULT_PROFILE="official"
 AUTOSTART_DELAY="${RM_VIEWER_AUTOSTART_DELAY:-5}"
 
 while [[ $# -gt 0 ]]; do
@@ -31,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   - RoboMaster Native Viewer (Official)
   - RoboMaster Native Viewer (Lab)
 
-默认仅启用 `lab`，可用 --default-profile 切换默认启用项。
+默认启用 `official`，可用 --default-profile 切换默认启用项。
 EOF
       exit 0
       ;;
@@ -59,11 +61,18 @@ if [[ ! -f "$SOURCE_LAUNCHER" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$SOURCE_SIMPLE_LAUNCHER" ]]; then
+  echo "缺少启动脚本: $SOURCE_SIMPLE_LAUNCHER" >&2
+  exit 1
+fi
+
 mkdir -p "$BIN_DIR" "$AUTOSTART_DIR"
 cp "$SOURCE_BIN" "$TARGET_BIN"
 cp "$SOURCE_LAUNCHER" "$TARGET_LAUNCHER"
+cp "$SOURCE_SIMPLE_LAUNCHER" "$TARGET_SIMPLE_LAUNCHER"
 chmod +x "$TARGET_BIN"
 chmod +x "$TARGET_LAUNCHER"
+chmod +x "$TARGET_SIMPLE_LAUNCHER"
 
 install_desktop_entry() {
   local profile=$1

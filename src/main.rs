@@ -20,12 +20,12 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:3334";
 const DEFAULT_0310_UDP_BIND: &str = "0.0.0.0:3335";
-const DEFAULT_WIDTH: usize = 1280;
-const DEFAULT_HEIGHT: usize = 720;
+const DEFAULT_WIDTH: usize = 800;
+const DEFAULT_HEIGHT: usize = 800;
 const DEFAULT_MQTT_HOST: &str = "192.168.12.1";
 const DEFAULT_MQTT_PORT: u16 = 3333;
 const DEFAULT_MQTT_TOPIC: &str = "CustomByteBlock";
-const DEFAULT_MQTT_CLIENT_ID: &str = "1";
+const DEFAULT_MQTT_CLIENT_ID: &str = "101";
 const DEFAULT_INPUT_FORMAT: &str = "h264";
 const DEFAULT_HEALTHY_GAP_MS: u64 = 3000;
 const DEFAULT_FRAME_TIMEOUT_MS: u64 = 2000;
@@ -44,6 +44,7 @@ struct AppConfig {
     mqtt_topic: String,
     mqtt_client_id: String,
     input_format: String,
+    raw_udp_enabled: bool,
     output_width: usize,
     output_height: usize,
     healthy_gap: Duration,
@@ -74,6 +75,7 @@ impl Default for AppConfig {
                 .unwrap_or_else(|_| DEFAULT_MQTT_CLIENT_ID.to_string()),
             input_format: env::var("RM_VIEWER_INPUT_FORMAT")
                 .unwrap_or_else(|_| DEFAULT_INPUT_FORMAT.to_string()),
+            raw_udp_enabled: default_raw_udp_enabled(),
             output_width: DEFAULT_WIDTH,
             output_height: DEFAULT_HEIGHT,
             healthy_gap: Duration::from_millis(DEFAULT_HEALTHY_GAP_MS),
@@ -81,7 +83,7 @@ impl Default for AppConfig {
             max_buffered_frames: DEFAULT_MAX_BUFFERED_FRAMES,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             max_slices_per_frame: DEFAULT_MAX_SLICES_PER_FRAME,
-            udp_0310_enabled: true,
+            udp_0310_enabled: default_udp_0310_enabled(),
             udp_0310_bind: DEFAULT_0310_UDP_BIND
                 .parse()
                 .expect("default 0310 udp bind addr must be valid"),
@@ -116,6 +118,21 @@ fn default_mqtt_port() -> u16 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_MQTT_PORT)
+}
+
+fn env_truthy(name: &str) -> bool {
+    matches!(env::var(name), Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("on"))
+}
+
+fn default_raw_udp_enabled() -> bool {
+    if env_truthy("RM_VIEWER_DISABLE_RAW_UDP") {
+        return false;
+    }
+    env_truthy("RM_VIEWER_ENABLE_RAW_UDP")
+}
+
+fn default_udp_0310_enabled() -> bool {
+    env_truthy("RM_VIEWER_ENABLE_0310_UDP")
 }
 
 impl AppConfig {
@@ -157,8 +174,17 @@ impl AppConfig {
                 "--mqtt-client-id" => {
                     config.mqtt_client_id = args.next().context("--mqtt-client-id 缺少参数")?;
                 }
+                "--client-id" => {
+                    config.mqtt_client_id = args.next().context("--client-id 缺少参数")?;
+                }
                 "--input-format" => {
                     config.input_format = args.next().context("--input-format 缺少参数")?;
+                }
+                "--raw-udp" | "--enable-raw-udp" => {
+                    config.raw_udp_enabled = true;
+                }
+                "--no-udp" | "--no-raw-udp" => {
+                    config.raw_udp_enabled = false;
                 }
                 "--no-mqtt" => {
                     config.mqtt_enabled = false;
@@ -171,6 +197,9 @@ impl AppConfig {
                 }
                 "--no-0310-udp" => {
                     config.udp_0310_enabled = false;
+                }
+                "--0310-udp" | "--enable-0310-udp" => {
+                    config.udp_0310_enabled = true;
                 }
                 "--width" => {
                     let value = args.next().context("--width 缺少参数")?;
@@ -196,6 +225,9 @@ impl AppConfig {
                     print_help();
                     std::process::exit(0);
                 }
+                other if !other.starts_with('-') => {
+                    config.mqtt_client_id = other.to_string();
+                }
                 other => bail!("未知参数: {other}"),
             }
         }
@@ -206,6 +238,9 @@ impl AppConfig {
 
 fn print_help() {
     println!("rm-native-viewer\n\n");
+    println!(
+        "  [mqtt-client-id]             可选快捷参数，例如: rm-native-viewer 101 或 rm-native-viewer 1"
+    );
     println!("  --bind <addr:port>           监听地址，默认 {DEFAULT_BIND_ADDR}");
     println!("  --allow-source <ip>          仅接收该源 IP 的 UDP 包");
     println!("  --ffmpeg <path>              ffmpeg 可执行文件路径，默认 ffmpeg");
@@ -213,11 +248,17 @@ fn print_help() {
     println!("  --mqtt-port <port>           MQTT 服务器端口，默认 {DEFAULT_MQTT_PORT}");
     println!("  --mqtt-topic <topic>         自定义字节流 topic，默认 {DEFAULT_MQTT_TOPIC}");
     println!("  --mqtt-client-id <id>        客户端 ID，默认 {DEFAULT_MQTT_CLIENT_ID}");
+    println!("  --client-id <id>             --mqtt-client-id 的简写");
     println!(
         "  --input-format <fmt>         ffmpeg 输入格式，默认 {DEFAULT_INPUT_FORMAT}，可设 hevc 兼容旧 UDP sender"
     );
+    println!("  --raw-udp / --enable-raw-udp 启用 UDP/3334 HEVC 原始图传输入，默认关闭");
+    println!("  --no-udp / --no-raw-udp      禁用 UDP/3334 HEVC 原始图传输入");
     println!("  --no-mqtt                    禁用 MQTT metadata 接收");
-    println!("  --0310-udp-bind <addr:port>  PV31/0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}");
+    println!(
+        "  --0310-udp-bind <addr:port>  PV31/0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}"
+    );
+    println!("  --0310-udp / --enable-0310-udp 启用 PV31 UDP 直连接收，默认关闭");
     println!("  --no-0310-udp                禁用 PV31 UDP 直连接收");
     println!("  --width <n>                  输出宽度，默认 {DEFAULT_WIDTH}");
     println!("  --height <n>                 输出高度，默认 {DEFAULT_HEIGHT}");
@@ -417,6 +458,16 @@ fn mqtt_receiver_loop(
     shared: Arc<Mutex<StatusSnapshot>>,
     encoded_tx: Sender<Vec<u8>>,
 ) {
+    // chunk seq 连续性追踪: PV31 chunk 按 byte-stream 切割, 不在 NAL 边界对齐;
+    // 只要丢一个 chunk, 后续直接拼接会让 ffmpeg 看到错乱的 NAL, 黑屏 / 花屏.
+    // 策略: 一旦发现 sequence gap, 就把缓冲清掉, 丢弃后续到第一个 SPS (NAL type 7),
+    //       下一个 IDR + SPS/PPS 到达后再恢复送解码器.
+    // 启动时: 同样阻塞, 等到第一个 SPS 出现才开始喂 ffmpeg, 否则 ffmpeg 会因为
+    //       从 NAL 中间开始 parse 而内部状态损坏, 即使后续 SPS/IDR 都收到也无法恢复.
+    let mut last_seq: Option<u32> = None;
+    let mut blocked_until_sps: bool = true; // 启动即阻塞
+    let mut dropped_chunks_after_gap: u64 = 0;
+
     loop {
         let mut mqtt_options = MqttOptions::new(
             config.mqtt_client_id.clone(),
@@ -456,8 +507,70 @@ fn mqtt_receiver_loop(
                     if let Some(chunk) = parse_video_0310_chunk(&raw_bytes) {
                         let now = Instant::now();
                         let payload_len = chunk.payload.len();
-                        if payload_len > 0 {
-                            if let Err(error) = encoded_tx.send(chunk.payload) {
+
+                        // 检测 sequence gap. flags & 1 == 1 表示 stream 重置;
+                        // 否则若 seq 不是 last_seq+1 则进入 "丢弃直到下一个 SPS" 模式.
+                        let stream_reset = (chunk.flags & 1) != 0;
+                        if stream_reset {
+                            // 流重启, 清空 ffmpeg 上游, 但仍然要等下一个 SPS 才能喂解码器.
+                            blocked_until_sps = true;
+                        } else if let Some(prev) = last_seq {
+                            if chunk.sequence != prev.wrapping_add(1) {
+                                blocked_until_sps = true;
+                                dropped_chunks_after_gap =
+                                    dropped_chunks_after_gap.saturating_add(1);
+                            }
+                        }
+                        last_seq = Some(chunk.sequence);
+
+                        let send_payload: Option<Vec<u8>> = if blocked_until_sps {
+                            // 在当前 chunk 内查找 SPS NAL (type=7).
+                            // SPS 起始码: 0x00 00 (00) 01, 紧随的字节 & 0x1F == 7.
+                            let p = chunk.payload.as_slice();
+                            let mut sps_at: Option<usize> = None;
+                            let mut i = 0usize;
+                            while i + 3 < p.len() {
+                                let three_byte_sc = p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1;
+                                let four_byte_sc = i + 4 < p.len()
+                                    && p[i] == 0
+                                    && p[i + 1] == 0
+                                    && p[i + 2] == 0
+                                    && p[i + 3] == 1;
+                                if three_byte_sc {
+                                    if (p[i + 3] & 0x1F) == 7 {
+                                        sps_at = Some(i);
+                                        break;
+                                    }
+                                    i += 3;
+                                } else if four_byte_sc {
+                                    if (p[i + 4] & 0x1F) == 7 {
+                                        sps_at = Some(i);
+                                        break;
+                                    }
+                                    i += 4;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            match sps_at {
+                                Some(off) => {
+                                    blocked_until_sps = false;
+                                    Some(p[off..].to_vec())
+                                }
+                                None => {
+                                    dropped_chunks_after_gap =
+                                        dropped_chunks_after_gap.saturating_add(1);
+                                    None
+                                }
+                            }
+                        } else if payload_len > 0 {
+                            Some(chunk.payload.clone())
+                        } else {
+                            None
+                        };
+
+                        if let Some(bytes) = send_payload {
+                            if let Err(error) = encoded_tx.send(bytes) {
                                 set_decoder_error(
                                     &shared,
                                     format!("0310 视频解码通道已断开: {error}"),
@@ -540,7 +653,10 @@ fn udp_0310_receiver_loop(
     let socket = match UdpSocket::bind(config.udp_0310_bind) {
         Ok(socket) => socket,
         Err(error) => {
-            set_decoder_error(&shared, format!("0310 UDP bind {} 失败: {error}", config.udp_0310_bind));
+            set_decoder_error(
+                &shared,
+                format!("0310 UDP bind {} 失败: {error}", config.udp_0310_bind),
+            );
             return;
         }
     };
@@ -573,10 +689,7 @@ fn udp_0310_receiver_loop(
 
                 if payload_len > 0 {
                     if let Err(error) = encoded_tx.send(chunk.payload) {
-                        set_decoder_error(
-                            &shared,
-                            format!("0310 UDP 解码通道已断开: {error}"),
-                        );
+                        set_decoder_error(&shared, format!("0310 UDP 解码通道已断开: {error}"));
                         continue;
                     }
                 }
@@ -616,6 +729,10 @@ fn spawn_udp_receiver(
     shared: Arc<Mutex<StatusSnapshot>>,
     hevc_tx: Sender<Vec<u8>>,
 ) -> Result<()> {
+    if !config.raw_udp_enabled {
+        return Ok(());
+    }
+
     thread::Builder::new()
         .name("rm-native-udp".to_string())
         .spawn(move || udp_receiver_loop(config, shared, hevc_tx))
@@ -1026,14 +1143,19 @@ fn spawn_ffmpeg(config: &AppConfig) -> Result<std::process::Child> {
         .args([
             "-loglevel",
             "warning",
+            // 注意: 不再使用 "-fflags nobuffer -probesize 32 -analyzeduration 0",
+            // 这套超低延迟参数仅适合 file/mmap 输入. 在 stdin pipe + 真实链路慢喂场景下,
+            // ffmpeg parser 会在还没看到完整 NAL 时就 timeout 进入 codec init,
+            // 从此 decoder 内部状态 lock 在错乱(花屏 + "non-existing PPS 0").
+            // probesize/analyzeduration 给足让 parser 有时间收齐 SPS/PPS+IDR.
             "-fflags",
-            "nobuffer",
+            "+discardcorrupt",
             "-flags",
             "low_delay",
             "-probesize",
-            "32",
+            "65536",
             "-analyzeduration",
-            "0",
+            "1000000",
             "-err_detect",
             "ignore_err",
             "-f",
@@ -1179,7 +1301,11 @@ impl eframe::App for ViewerApp {
                         let pv31_ok = mqtt_video_ok || udp_0310_ok;
 
                         ui.colored_label(
-                            if pv31_ok { Color32::from_rgb(54, 179, 126) } else { Color32::from_rgb(214, 162, 65) },
+                            if pv31_ok {
+                                Color32::from_rgb(54, 179, 126)
+                            } else {
+                                Color32::from_rgb(214, 162, 65)
+                            },
                             format!(
                                 "0310 Video: {}",
                                 if pv31_ok { "connected" } else { "waiting" }
@@ -1188,11 +1314,12 @@ impl eframe::App for ViewerApp {
 
                         let raw_ok = view.udp_ok;
                         ui.colored_label(
-                            if raw_ok { Color32::from_rgb(54, 179, 126) } else { Color32::from_rgb(130, 130, 130) },
-                            format!(
-                                "UDP Raw: {}",
-                                if raw_ok { "connected" } else { "waiting" }
-                            ),
+                            if raw_ok {
+                                Color32::from_rgb(54, 179, 126)
+                            } else {
+                                Color32::from_rgb(130, 130, 130)
+                            },
+                            format!("UDP Raw: {}", if raw_ok { "connected" } else { "waiting" }),
                         );
                         ui.colored_label(
                             decode_color,
@@ -1245,13 +1372,15 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("Buffered frames: {}", view.buffered_frames));
                         ui.label(format!("Decoded frames: {}", view.decoded_frames));
                         ui.label(format!("MQTT messages: {}", view.mqtt_messages_received));
-                        if !view.mqtt_enabled {
-                            ui.label(format!(
-                                "PV31 UDP: {} pkts seq={}",
-                                view.udp_0310_packets,
-                                view.udp_0310_last_seq,
-                            ));
-                        }
+                        ui.label(format!(
+                            "PV31 UDP: {} pkts assembled={} seq={} age={}",
+                            view.udp_0310_packets,
+                            view.udp_0310_assembled,
+                            view.udp_0310_last_seq,
+                            view.udp_0310_age_ms
+                                .map(|age| format!("{} ms", age))
+                                .unwrap_or_else(|| "-".to_string())
+                        ));
                         ui.label(format!("Display FPS: {:.1}", self.display_fps));
                         ui.label(format!(
                             "Last packet age: {}",
