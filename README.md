@@ -91,7 +91,7 @@ cargo run --release -- 1
 - topic 为 `CustomByteBlock`
 - client id 为 `101`
 - 输入格式为 `h264`
-- 显示窗口为 `800x800`
+- 显示输出默认自动跟随当前显示器，最高 `2560x1600`；无图形环境时回退为 `800x800`
 - UDP/3334 原始图传和本地 `0x0310` UDP 默认关闭
 
 需要显式指定 client id 时：
@@ -109,8 +109,8 @@ cargo run --release -- 1
 - `--raw-udp` / `--enable-raw-udp`：启用 UDP/3334 HEVC 原始图传输入，默认关闭
 - `--no-udp` / `--no-raw-udp`：关闭 UDP/3334 HEVC 原始图传输入
 - `--0310-udp` / `--enable-0310-udp`：启用本地 0x0310 视频 UDP 直连接收，默认关闭
-- `--width <n>`：显示宽度，默认 `800`
-- `--height <n>`：显示高度，默认 `800`
+- `--width <n>`：显示宽度，默认自动跟随当前显示器，最高 `2560`
+- `--height <n>`：显示高度，默认自动跟随当前显示器，最高 `1600`
 - `--ffmpeg <path>`：ffmpeg 路径，默认 `ffmpeg`
 - `--mqtt-host <host>`：MQTT 地址，默认 `192.168.12.1`
 - `--mqtt-port <port>`：MQTT 端口，默认 `3333`

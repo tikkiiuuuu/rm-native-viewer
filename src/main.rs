@@ -22,6 +22,8 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:3334";
 const DEFAULT_0310_UDP_BIND: &str = "0.0.0.0:3335";
 const DEFAULT_WIDTH: usize = 800;
 const DEFAULT_HEIGHT: usize = 800;
+const DEFAULT_AUTO_MAX_WIDTH: usize = 2560;
+const DEFAULT_AUTO_MAX_HEIGHT: usize = 1600;
 const DEFAULT_MQTT_HOST: &str = "192.168.12.1";
 const DEFAULT_MQTT_PORT: u16 = 3333;
 const DEFAULT_MQTT_TOPIC: &str = "CustomByteBlock";
@@ -60,6 +62,8 @@ struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let (output_width, output_height) = default_output_size();
+
         Self {
             bind_addr: DEFAULT_BIND_ADDR
                 .parse()
@@ -76,8 +80,8 @@ impl Default for AppConfig {
             input_format: env::var("RM_VIEWER_INPUT_FORMAT")
                 .unwrap_or_else(|_| DEFAULT_INPUT_FORMAT.to_string()),
             raw_udp_enabled: default_raw_udp_enabled(),
-            output_width: DEFAULT_WIDTH,
-            output_height: DEFAULT_HEIGHT,
+            output_width,
+            output_height,
             healthy_gap: Duration::from_millis(DEFAULT_HEALTHY_GAP_MS),
             frame_timeout: Duration::from_millis(DEFAULT_FRAME_TIMEOUT_MS),
             max_buffered_frames: DEFAULT_MAX_BUFFERED_FRAMES,
@@ -103,6 +107,63 @@ fn default_ffmpeg_bin() -> String {
     }
 
     "ffmpeg".to_string()
+}
+
+fn default_output_size() -> (usize, usize) {
+    detect_display_size()
+        .map(|(width, height)| {
+            (
+                width.min(DEFAULT_AUTO_MAX_WIDTH),
+                height.min(DEFAULT_AUTO_MAX_HEIGHT),
+            )
+        })
+        .unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT))
+}
+
+fn detect_display_size() -> Option<(usize, usize)> {
+    if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_none() {
+        return None;
+    }
+
+    let output = Command::new("xrandr")
+        .arg("--current")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_xrandr_current_resolution(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_xrandr_current_resolution(output: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = output.lines().collect();
+
+    for matcher in [" connected primary ", " connected "] {
+        for line in &lines {
+            if !line.contains(matcher) || line.contains(" disconnected ") {
+                continue;
+            }
+
+            for token in line.split_whitespace() {
+                let Some((resolution, _offset)) = token.split_once('+') else {
+                    continue;
+                };
+                let Some((width, height)) = resolution.split_once('x') else {
+                    continue;
+                };
+
+                let width = width.parse().ok()?;
+                let height = height.parse().ok()?;
+                return Some((width, height));
+            }
+        }
+    }
+
+    None
 }
 
 fn default_mqtt_enabled() -> bool {
@@ -258,8 +319,12 @@ fn print_help() {
     println!("  --0310-udp-bind <addr:port>  0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}");
     println!("  --0310-udp / --enable-0310-udp 启用 0x0310 UDP 直连接收，默认关闭");
     println!("  --no-0310-udp                禁用 0x0310 UDP 直连接收");
-    println!("  --width <n>                  输出宽度，默认 {DEFAULT_WIDTH}");
-    println!("  --height <n>                 输出高度，默认 {DEFAULT_HEIGHT}");
+    println!(
+        "  --width <n>                  输出宽度，默认自动跟随显示器，最高 {DEFAULT_AUTO_MAX_WIDTH}；无显示环境回退 {DEFAULT_WIDTH}"
+    );
+    println!(
+        "  --height <n>                 输出高度，默认自动跟随显示器，最高 {DEFAULT_AUTO_MAX_HEIGHT}；无显示环境回退 {DEFAULT_HEIGHT}"
+    );
     println!("  --headless-seconds <n>       无窗口烟测模式");
 }
 
@@ -1138,12 +1203,50 @@ fn decoder_loop(
     }
 }
 
-fn spawn_ffmpeg(config: &AppConfig) -> Result<std::process::Child> {
-    let filter = format!(
+fn ffmpeg_supports_filter(ffmpeg_bin: &str, filter_name: &str) -> bool {
+    let output = match Command::new(ffmpeg_bin)
+        .args(["-hide_banner", "-filters"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(filter_name))
+}
+
+fn build_ffmpeg_filter(config: &AppConfig) -> String {
+    if ffmpeg_supports_filter(&config.ffmpeg_bin, "libplacebo") {
+        let mut filter = format!(
+            "libplacebo=w={w}:h={h}:force_original_aspect_ratio=decrease:normalize_sar=true:upscaler=ewa_lanczos:downscaler=ewa_lanczos:deband=true:deband_iterations=16:deband_radius=64:deband_threshold=12:deband_grain=2:disable_builtin=true:lut_entries=256:force_dither=true:dither_temporal=true,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
+            w = config.output_width,
+            h = config.output_height
+        );
+
+        if ffmpeg_supports_filter(&config.ffmpeg_bin, "cas") {
+            filter.push_str(",cas=strength=0.6");
+        }
+
+        return filter;
+    }
+
+    format!(
         "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
         w = config.output_width,
         h = config.output_height
-    );
+    )
+}
+
+fn spawn_ffmpeg(config: &AppConfig) -> Result<std::process::Child> {
+    let filter = build_ffmpeg_filter(config);
 
     Command::new(&config.ffmpeg_bin)
         .args([
