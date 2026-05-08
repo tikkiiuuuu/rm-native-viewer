@@ -5,7 +5,7 @@
 当前版本已经按正式链路工作：
 
 - 通过 MQTT 订阅 `CustomByteBlock`
-- 把 `0x0310` 的 300 字节 `PV31` 分片重组为 H264 字节流
+- 把 `0x0310` 的 300 字节紧凑视频分片重组为 H264 字节流
 - 调用系统 `ffmpeg` 解码
 - 在原生窗口中显示画面并叠加状态信息
 - 对非视频 `0x0310` 数据兼容 telemetry v1 解析
@@ -13,7 +13,7 @@
 
 ## 功能概览
 
-- 官方主链路：MQTT `CustomByteBlock` -> `0x0310` -> `PV31` -> H264
+- 官方主链路：MQTT `CustomByteBlock` -> `0x0310` -> 紧凑视频分片 -> H264
 - telemetry fallback：同一条 `0x0310` 链路上兼容解析状态结构体
 - 旧链路兼容：可显式启用 UDP 3334 + HEVC
 - 原生窗口显示：无浏览器依赖
@@ -33,7 +33,7 @@ rm-native-viewer/
 
 说明：
 
-- `src/`：Rust 主程序与 `PV31` / telemetry 解析逻辑
+- `src/`：Rust 主程序与紧凑 `0x0310` 视频头 / telemetry 解析逻辑
 - `scripts/`：启动、部署辅助脚本
 - `deploy/`：桌面自启动和 systemd 相关模板
 
@@ -92,7 +92,7 @@ cargo run --release -- 1
 - client id 为 `101`
 - 输入格式为 `h264`
 - 显示窗口为 `800x800`
-- UDP/3334 原始图传和本地 PV31 UDP 默认关闭
+- UDP/3334 原始图传和本地 `0x0310` UDP 默认关闭
 
 需要显式指定 client id 时：
 
@@ -108,7 +108,7 @@ cargo run --release -- 1
 - `--allow-source <ip>`：限制 UDP 来源 IP
 - `--raw-udp` / `--enable-raw-udp`：启用 UDP/3334 HEVC 原始图传输入，默认关闭
 - `--no-udp` / `--no-raw-udp`：关闭 UDP/3334 HEVC 原始图传输入
-- `--0310-udp` / `--enable-0310-udp`：启用本地 PV31 UDP 直连接收，默认关闭
+- `--0310-udp` / `--enable-0310-udp`：启用本地 0x0310 视频 UDP 直连接收，默认关闭
 - `--width <n>`：显示宽度，默认 `800`
 - `--height <n>`：显示高度，默认 `800`
 - `--ffmpeg <path>`：ffmpeg 路径，默认 `ffmpeg`
@@ -128,23 +128,23 @@ cargo run --release -- 1
 
 - 输入：MQTT `CustomByteBlock`
 - 负载：官方 `0x0310`
-- 业务封装：`PV31`
+- 业务封装：3 字节紧凑视频头
 - 视频编码：H264
 
-`PV31` 固定占满 `0x0310` 的 300 字节：
+当前视频分片固定占满 `0x0310` 的 300 字节：
 
-- 24 字节头：`magic/version/codec/flags/sequence/stream_ms/payload_bytes/checksum`
-- 276 字节视频净荷
+- 3 字节头：`flags_and_payload_hi` / `sequence` / `payload_bytes_lo`
+- 297 字节视频净荷
 
 设计目标：
 
 - 50Hz 发送
 - 理论总带宽约 15KB/s
-- 实际视频净流建议控制在约 12KB/s 内
+- 实际视频净流顶到约 14.85KB/s
 
 ### 2. telemetry fallback
 
-如果 `CustomByteBlock.data` 不是 `PV31` 视频分片，程序会回退为 telemetry v1 解析，用于在画面上叠加：
+如果 `CustomByteBlock.data` 不符合当前紧凑视频头约束，程序会回退为 telemetry v1 解析，用于在画面上叠加：
 
 - 相机在线状态
 - gimbal 在线状态与模式
@@ -268,8 +268,8 @@ cargo build --release
 - 当前发送端是不是 H264
 - `--input-format` 是否匹配
 - `CustomByteBlock` topic 是否正确
-- 发送端是否真的在发 `PV31`
+- 发送端是否真的在发当前紧凑视频分片
 
 ### 3. 只想测 MQTT 主链路，不要 UDP 干扰
 
-默认已经关闭 UDP/3334 和本地 PV31 UDP，只走官方 MQTT 主链路。需要旧链路调试时再显式加 `--raw-udp` 或 `--0310-udp`。
+默认已经关闭 UDP/3334 和本地 `0x0310` UDP，只走官方 MQTT 主链路。需要旧链路调试时再显式加 `--raw-udp` 或 `--0310-udp`。

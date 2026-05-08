@@ -3,8 +3,8 @@ mod custom_client;
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use custom_client::{
-    MetadataSnapshot, VehicleTelemetry, decode_custom_byte_block, parse_vehicle_telemetry,
-    parse_video_0310_chunk,
+    MetadataSnapshot, VIDEO_0310_HEADER_BYTES, VehicleTelemetry, decode_custom_byte_block,
+    parse_vehicle_telemetry, parse_video_0310_chunk,
 };
 use eframe::egui::{self, Align2, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
@@ -255,11 +255,9 @@ fn print_help() {
     println!("  --raw-udp / --enable-raw-udp 启用 UDP/3334 HEVC 原始图传输入，默认关闭");
     println!("  --no-udp / --no-raw-udp      禁用 UDP/3334 HEVC 原始图传输入");
     println!("  --no-mqtt                    禁用 MQTT metadata 接收");
-    println!(
-        "  --0310-udp-bind <addr:port>  PV31/0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}"
-    );
-    println!("  --0310-udp / --enable-0310-udp 启用 PV31 UDP 直连接收，默认关闭");
-    println!("  --no-0310-udp                禁用 PV31 UDP 直连接收");
+    println!("  --0310-udp-bind <addr:port>  0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}");
+    println!("  --0310-udp / --enable-0310-udp 启用 0x0310 UDP 直连接收，默认关闭");
+    println!("  --no-0310-udp                禁用 0x0310 UDP 直连接收");
     println!("  --width <n>                  输出宽度，默认 {DEFAULT_WIDTH}");
     println!("  --height <n>                 输出高度，默认 {DEFAULT_HEIGHT}");
     println!("  --headless-seconds <n>       无窗口烟测模式");
@@ -433,6 +431,14 @@ fn set_metadata_error(shared: &Arc<Mutex<StatusSnapshot>>, message: impl Into<St
     }
 }
 
+fn sequence_follows(prev: u32, next: u32, modulus: u32) -> bool {
+    if modulus > 0 {
+        next == prev.wrapping_add(1) % modulus
+    } else {
+        next == prev.wrapping_add(1)
+    }
+}
+
 fn spawn_metadata_receiver(
     config: AppConfig,
     shared: Arc<Mutex<StatusSnapshot>>,
@@ -458,7 +464,7 @@ fn mqtt_receiver_loop(
     shared: Arc<Mutex<StatusSnapshot>>,
     encoded_tx: Sender<Vec<u8>>,
 ) {
-    // chunk seq 连续性追踪: PV31 chunk 按 byte-stream 切割, 不在 NAL 边界对齐;
+    // chunk seq 连续性追踪: 0x0310 视频分片没有重传;
     // 只要丢一个 chunk, 后续直接拼接会让 ffmpeg 看到错乱的 NAL, 黑屏 / 花屏.
     // 策略: 一旦发现 sequence gap, 就把缓冲清掉, 丢弃后续到第一个 SPS (NAL type 7),
     //       下一个 IDR + SPS/PPS 到达后再恢复送解码器.
@@ -515,7 +521,7 @@ fn mqtt_receiver_loop(
                             // 流重启, 清空 ffmpeg 上游, 但仍然要等下一个 SPS 才能喂解码器.
                             blocked_until_sps = true;
                         } else if let Some(prev) = last_seq {
-                            if chunk.sequence != prev.wrapping_add(1) {
+                            if !sequence_follows(prev, chunk.sequence, chunk.sequence_modulus) {
                                 blocked_until_sps = true;
                                 dropped_chunks_after_gap =
                                     dropped_chunks_after_gap.saturating_add(1);
@@ -641,7 +647,7 @@ fn spawn_udp_0310_receiver(
     thread::Builder::new()
         .name("rm-native-udp0310".to_string())
         .spawn(move || udp_0310_receiver_loop(config, shared, encoded_tx))
-        .context("无法启动 PV31 UDP 接收线程")?;
+        .context("无法启动 0x0310 UDP 接收线程")?;
     Ok(())
 }
 
@@ -675,7 +681,7 @@ fn udp_0310_receiver_loop(
     loop {
         match socket.recv_from(&mut packet) {
             Ok((size, source)) => {
-                if size < 24 {
+                if size < VIDEO_0310_HEADER_BYTES {
                     continue;
                 }
 
@@ -1373,7 +1379,7 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("Decoded frames: {}", view.decoded_frames));
                         ui.label(format!("MQTT messages: {}", view.mqtt_messages_received));
                         ui.label(format!(
-                            "PV31 UDP: {} pkts assembled={} seq={} age={}",
+                            "0x0310 UDP: {} pkts assembled={} seq={} age={}",
                             view.udp_0310_packets,
                             view.udp_0310_assembled,
                             view.udp_0310_last_seq,

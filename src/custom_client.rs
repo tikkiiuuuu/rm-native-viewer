@@ -5,13 +5,13 @@ pub const TELEMETRY_VERSION: u16 = 1;
 pub const TELEMETRY_FLAG_CAMERA_ONLINE: u32 = 1 << 0;
 pub const TELEMETRY_FLAG_GIMBAL_ONLINE: u32 = 1 << 1;
 
-pub const VIDEO_0310_MAGIC: [u8; 4] = *b"PV31";
-pub const VIDEO_0310_VERSION: u8 = 1;
-pub const VIDEO_0310_HEADER_BYTES: usize = 24;
-pub const VIDEO_0310_PAYLOAD_BYTES: usize = 276;
+pub const VIDEO_0310_FLAG_RESET: u8 = 1 << 0;
+pub const VIDEO_0310_PAYLOAD_BYTES_MSB_MASK: u8 = 1 << 1;
+pub const VIDEO_0310_RESERVED_MASK: u8 = 0xFC;
+pub const VIDEO_0310_HEADER_BYTES: usize = 3;
+pub const VIDEO_0310_PAYLOAD_BYTES: usize = 297;
 pub const VIDEO_0310_PACKET_BYTES: usize = VIDEO_0310_HEADER_BYTES + VIDEO_0310_PAYLOAD_BYTES;
 pub const VIDEO_CODEC_H264: u8 = 1;
-pub const VIDEO_CODEC_HEVC: u8 = 2;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
@@ -81,6 +81,7 @@ pub struct Video0310Chunk {
     pub codec: u8,
     pub flags: u8,
     pub sequence: u32,
+    pub sequence_modulus: u32,
     pub stream_ms: u32,
     pub payload: Vec<u8>,
 }
@@ -207,32 +208,15 @@ pub fn parse_video_0310_chunk(data: &[u8]) -> Option<Video0310Chunk> {
     }
 
     let mut cursor = 0_usize;
-    let magic = read_exact::<4>(data, &mut cursor)?;
-    if magic != VIDEO_0310_MAGIC {
+    let header = read_u8(data, &mut cursor)?;
+    if (header & VIDEO_0310_RESERVED_MASK) != 0 {
         return None;
     }
 
-    let version = read_u8(data, &mut cursor)?;
-    if version != VIDEO_0310_VERSION {
-        return None;
-    }
-
-    let header_bytes = read_u8(data, &mut cursor)? as usize;
-    if header_bytes != VIDEO_0310_HEADER_BYTES {
-        return None;
-    }
-
-    let codec = read_u8(data, &mut cursor)?;
-    if codec != VIDEO_CODEC_H264 && codec != VIDEO_CODEC_HEVC {
-        return None;
-    }
-
-    let flags = read_u8(data, &mut cursor)?;
-    let sequence = read_u32_le(data, &mut cursor)?;
-    let stream_ms = read_u32_le(data, &mut cursor)?;
-    let payload_len = read_u16_le(data, &mut cursor)? as usize;
-    let payload_checksum = read_u16_le(data, &mut cursor)?;
-    let _reserved = read_u32_le(data, &mut cursor)?;
+    let flags = header & VIDEO_0310_FLAG_RESET;
+    let sequence = read_u8(data, &mut cursor)? as u32;
+    let payload_len = read_u8(data, &mut cursor)? as usize
+        | (usize::from((header & VIDEO_0310_PAYLOAD_BYTES_MSB_MASK) != 0) << 8);
 
     if payload_len > VIDEO_0310_PAYLOAD_BYTES || cursor != VIDEO_0310_HEADER_BYTES {
         return None;
@@ -240,15 +224,13 @@ pub fn parse_video_0310_chunk(data: &[u8]) -> Option<Video0310Chunk> {
 
     let payload_end = VIDEO_0310_HEADER_BYTES.checked_add(payload_len)?;
     let payload = data.get(VIDEO_0310_HEADER_BYTES..payload_end)?.to_vec();
-    if checksum16(&payload) != payload_checksum {
-        return None;
-    }
 
     Some(Video0310Chunk {
-        codec,
+        codec: VIDEO_CODEC_H264,
         flags,
         sequence,
-        stream_ms,
+        sequence_modulus: 256,
+        stream_ms: 0,
         payload,
     })
 }
@@ -259,12 +241,6 @@ fn decode_status_text(bytes: &[u8]) -> String {
         .position(|value| *value == 0)
         .unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).trim().to_string()
-}
-
-fn checksum16(bytes: &[u8]) -> u16 {
-    bytes
-        .iter()
-        .fold(0_u16, |sum, value| sum.wrapping_add(*value as u16))
 }
 
 fn decode_varint(data: &[u8], cursor: &mut usize) -> Option<u64> {
@@ -323,8 +299,8 @@ fn read_exact<const N: usize>(data: &[u8], cursor: &mut usize) -> Option<[u8; N]
 mod tests {
     use super::{
         TELEMETRY_FLAG_CAMERA_ONLINE, TELEMETRY_FLAG_GIMBAL_ONLINE, VIDEO_0310_HEADER_BYTES,
-        VIDEO_0310_PACKET_BYTES, VIDEO_CODEC_H264, checksum16, decode_custom_byte_block,
-        parse_vehicle_telemetry, parse_video_0310_chunk,
+        VIDEO_0310_PACKET_BYTES, VIDEO_0310_PAYLOAD_BYTES_MSB_MASK, VIDEO_CODEC_H264,
+        decode_custom_byte_block, parse_vehicle_telemetry, parse_video_0310_chunk,
     };
 
     #[test]
@@ -379,22 +355,36 @@ mod tests {
     fn parses_video_0310_chunk() {
         let payload = b"abc123";
         let mut bytes = vec![0_u8; VIDEO_0310_PACKET_BYTES];
-        bytes[..4].copy_from_slice(b"PV31");
-        bytes[4] = 1;
-        bytes[5] = VIDEO_0310_HEADER_BYTES as u8;
-        bytes[6] = VIDEO_CODEC_H264;
-        bytes[7] = 1;
-        bytes[8..12].copy_from_slice(&42_u32.to_le_bytes());
-        bytes[12..16].copy_from_slice(&1000_u32.to_le_bytes());
-        bytes[16..18].copy_from_slice(&(payload.len() as u16).to_le_bytes());
-        bytes[18..20].copy_from_slice(&checksum16(payload).to_le_bytes());
-        bytes[24..24 + payload.len()].copy_from_slice(payload);
+        bytes[0] = 1;
+        bytes[1] = 42;
+        bytes[2] = payload.len() as u8;
+        bytes[VIDEO_0310_HEADER_BYTES..VIDEO_0310_HEADER_BYTES + payload.len()]
+            .copy_from_slice(payload);
 
         let chunk = parse_video_0310_chunk(&bytes).expect("video chunk should parse");
         assert_eq!(chunk.codec, VIDEO_CODEC_H264);
         assert_eq!(chunk.flags, 1);
         assert_eq!(chunk.sequence, 42);
-        assert_eq!(chunk.stream_ms, 1000);
+        assert_eq!(chunk.sequence_modulus, 256);
+        assert_eq!(chunk.payload, payload);
+    }
+
+    #[test]
+    fn parses_video_0310_chunk_with_297_byte_payload() {
+        let payload = vec![0x5A_u8; 297];
+        let mut bytes = vec![0_u8; VIDEO_0310_PACKET_BYTES];
+        bytes[0] = 1 | VIDEO_0310_PAYLOAD_BYTES_MSB_MASK;
+        bytes[1] = 7;
+        bytes[2] = 41;
+        bytes[VIDEO_0310_HEADER_BYTES..VIDEO_0310_HEADER_BYTES + payload.len()]
+            .copy_from_slice(&payload);
+
+        let chunk = parse_video_0310_chunk(&bytes).expect("video chunk should parse");
+        assert_eq!(chunk.codec, VIDEO_CODEC_H264);
+        assert_eq!(chunk.flags, 1);
+        assert_eq!(chunk.sequence, 7);
+        assert_eq!(chunk.sequence_modulus, 256);
+        assert_eq!(chunk.stream_ms, 0);
         assert_eq!(chunk.payload, payload);
     }
 }
