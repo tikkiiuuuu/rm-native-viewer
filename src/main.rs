@@ -193,7 +193,9 @@ fn default_raw_udp_enabled() -> bool {
 }
 
 fn default_udp_0310_enabled() -> bool {
-    env_truthy("RM_VIEWER_ENABLE_0310_UDP")
+    // 本地链路默认开启 0x0310 UDP 直连，无需 MQTT 服务器
+    // 设 RM_VIEWER_DISABLE_0310_UDP=1 可关闭
+    !env_truthy("RM_VIEWER_DISABLE_0310_UDP")
 }
 
 impl AppConfig {
@@ -317,7 +319,7 @@ fn print_help() {
     println!("  --no-udp / --no-raw-udp      禁用 UDP/3334 HEVC 原始图传输入");
     println!("  --no-mqtt                    禁用 MQTT metadata 接收");
     println!("  --0310-udp-bind <addr:port>  0x0310 UDP 监听地址，默认 {DEFAULT_0310_UDP_BIND}");
-    println!("  --0310-udp / --enable-0310-udp 启用 0x0310 UDP 直连接收，默认关闭");
+    println!("  --0310-udp / --enable-0310-udp 启用 0x0310 UDP 直连接收，默认开启");
     println!("  --no-0310-udp                禁用 0x0310 UDP 直连接收");
     println!(
         "  --width <n>                  输出宽度，默认自动跟随显示器，最高 {DEFAULT_AUTO_MAX_WIDTH}；无显示环境回退 {DEFAULT_WIDTH}"
@@ -1367,6 +1369,20 @@ impl eframe::App for ViewerApp {
                         );
                     });
                 }
+
+                // 屏幕中心绿色十字瞄准线
+                let painter = ui.painter();
+                let rect = ui.min_rect();
+                let center = rect.center();
+                let green = Color32::from_rgba_unmultiplied(0, 255, 0, 200);
+                painter.line_segment(
+                    [egui::pos2(rect.left(), center.y), egui::pos2(rect.right(), center.y)],
+                    (1.5, green),
+                );
+                painter.line_segment(
+                    [egui::pos2(center.x, rect.top()), egui::pos2(center.x, rect.bottom())],
+                    (1.5, green),
+                );
             });
 
         let view = snapshot_view(&self.shared, self.config.healthy_gap);
